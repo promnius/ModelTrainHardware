@@ -10,9 +10,14 @@
 // LIBRARY INCLUDES
 #include <SPI.h>              // We use this library within the MCP23S17 library, so it must be called here.
 #include <MCP23S17.h>
+#include <EEPROM.h>
 
 // VARIABLE DECLARATIONS
-int buttonToTurnoutMap[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}; // this
+int buttonToTurnoutMap[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}; // this maps turnouts to buttons (sort of, there
+// are a few hardwired specialities like a single button being wired to multiple turnouts). It isn't really used functionally
+// (note that every button maps to its own turnout right now). The current setup also doesn't really support mapping multiple
+// turnouts to a single button, so for right now this should probably be left alone and not used. But if appropriately
+// utilized, this has some very interesting applications.
 
 int heartBeatCounter = 0; // only for dividing down timer2 to a visible speed
 boolean heartBeatStatus = false; // keeps track of heartbeat on or off.
@@ -32,7 +37,7 @@ int intREDLEDStatusMASK = 0; // not used. currently all LED states are figured o
 // when the turnout status changes. It could be more efficient, and allow additional effects like blinking lights etc. to keep a mask (or 
 // array) that tracks the status of the LEDs separate from the status of the turnouts.
 int intGREENLEDStatusMASK = 0;
-
+const int SOLENOIDSWITCHTIME = 300; // in ms
 
 // PIN DECLARATIONS
 const unsigned short pinHEARTBEAT = 9;
@@ -81,7 +86,7 @@ void setup() {
   pinMode(pinHEARTBEAT, OUTPUT);
   digitalWrite(pinHEARTBEAT, LOW);
 
-  // Serial.begin(9600); // We actually don't use serial in this project outside of debugging 
+  Serial.begin(9600); // We actually don't use serial in this project outside of debugging 
 
   // initializing hardware pins (and default states where necessary).
   initializePortExpanders();
@@ -149,7 +154,7 @@ void setTurnout(int intTurnout, int intNewState){
   else {
     mcpSolenoidDrives1.digitalWrite(intTurnoutIndex-15, HIGH);    
   }
-  delay(500); // time for the solenoid to actually switch. Note that this is blocking so all button presses, or any
+  delay(SOLENOIDSWITCHTIME); // time for the solenoid to actually switch. Note that this is blocking so all button presses, or any
   // other library that doesn't use interrupts will freeze here. Could be fixed in the future with an event handler, but
   // for this use case there is no issue with the delay.
   mcpSolenoidDrives0.digitalWrite(0); // turn off all the solenoids so nothing lights on fire.
@@ -202,7 +207,8 @@ void interpretButtons(){
       updatePanelLEDs();
       setTurnout(buttonToTurnoutMap[i], intTurnoutStatus[i]);
       if (i == 0) { // button 0 is special, as this corresponds to the button that controls 2 turnouts
-        intTurnoutStatus[15] = intTurnoutStatus[1];
+        //Serial.println("Special Button Pressed!");
+        intTurnoutStatus[15] = intTurnoutStatus[0];
         updatePanelLEDs();
         setTurnout(15, intTurnoutStatus[15]);
       }
@@ -322,14 +328,57 @@ void turnOnAllLights(){
 
 // saves all presets to disk. Could be more efficient and only save the ones that have changed, or swap up the address used
 // to prevent wear, but it won't matter for this project. Useful anytime a preset changes.
+// also a total hack. oh well.
 void saveStateToDisk(){
-    
+  unsigned int intDefault = 0;
+  unsigned int intProgram0 = 0;
+  unsigned int intProgram1 = 0;
+  for (int i = 0; i < 16; i++){ // create mask
+    if (intTurnoutDefaultState[i] == 1) { intDefault = intDefault | (0b0000000000000001 << i);}
+    if (intTurnoutSetting0[i] == 1) { intProgram0 = intProgram0 | (0b0000000000000001 << i);}
+    if (intTurnoutSetting1[i] == 1) { intProgram1 = intProgram1 | (0b0000000000000001 << i);}    
+  }
+  // so ugly, I don't want to talk about it
+  EEPROM.write(500, (uint8_t)(intDefault & 0b0000000011111111));
+  EEPROM.write(501, (uint8_t)((intDefault & 0b1111111100000000)>>8));
+  EEPROM.write(502, (uint8_t)(intProgram0 & 0b0000000011111111));
+  EEPROM.write(503, (uint8_t)((intProgram0 & 0b1111111100000000)>>8));
+  EEPROM.write(504, (uint8_t)(intProgram1 & 0b0000000011111111));
+  EEPROM.write(505, (uint8_t)((intProgram1 & 0b1111111100000000)>>8));
+
+  // to refresh, for testing
+  //EEPROM.write(500, 0b00000000);
+  //EEPROM.write(501, 0b00000000);
+  //EEPROM.write(502, 0b00000000);
+  //EEPROM.write(503, 0b00000000);
+  //EEPROM.write(504, 0b00000000);
+  //EEPROM.write(505, 0b00000000);
 }
 
-// loads all presets from disk. Useful on startup.
+// loads all presets from disk. Useful on startup. A total hack but it works.
 void loadStateFromDisk(){
-  
+  byte temp = 0b00000000;
+  for (int byteCounter = 0; byteCounter < 6; byteCounter ++){
+    temp = EEPROM.read(500+byteCounter);
+    //Serial.print("BYTE:");
+    //Serial.println(byteCounter);
+    for (int i = 0; i < 8; i++){ // unpack
+      //Serial.print(i); Serial.print(":");
+      if (((0b00000001 << i) & temp) > 0){
+        if (byteCounter < 2) {intTurnoutDefaultState[i + (8*byteCounter)] = 1;} // loading default
+        else if (byteCounter < 4) {intTurnoutSetting0[i + (8*(byteCounter-2))] = 1;} // loading setting 0
+        else {intTurnoutSetting1[i + (8*(byteCounter-4))] = 1;} // loading setting 1
+        //Serial.println("1");
+      } else {
+        if (byteCounter < 2) {intTurnoutDefaultState[i + (8*byteCounter)] = 0;} // loading default
+        else if (byteCounter < 4) {intTurnoutSetting0[i + (8*(byteCounter-2))] = 0;} // loading setting 0
+        else {intTurnoutSetting1[i + (8*(byteCounter-4))] = 0;} // loading setting 1
+        //Serial.println("0");
+      }
+    }
+  }
 }
+
 
 // this function drives every solenoid to the position the software thinks it is in. This is useful on startup when
 // we don't know where anything is, or anytime the user thinks a solenoid has been modified by hand, as it reasserts
@@ -337,6 +386,7 @@ void loadStateFromDisk(){
 // current advise, turn all lights on while this is active to provide feedback.
 void establishDefaultState(){
   for (int i = 0; i<16; i++){
+    intTurnoutStatus[i] = intTurnoutDefaultState[i];
     setTurnout(i, intTurnoutStatus[i]);
   }
 }
